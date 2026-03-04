@@ -1,10 +1,23 @@
-@preconcurrency import Speech
-@preconcurrency import AVFoundation
+import AVFoundation
 import CoreAudio
-import CoreMedia
+import FluidAudio
 import Observation
+import os
 
-/// Orchestrates dual SpeechAnalyzer instances for mic (you) and system audio (them).
+/// Simple file logger for diagnostics — writes to /tmp/onthespot.log
+func diagLog(_ msg: String) {
+    let line = "\(Date()): \(msg)\n"
+    let path = "/tmp/onthespot.log"
+    if let fh = FileHandle(forWritingAtPath: path) {
+        fh.seekToEndOfFile()
+        fh.write(line.data(using: .utf8)!)
+        fh.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+    }
+}
+
+/// Orchestrates dual StreamingTranscriber instances for mic (you) and system audio (them).
 @Observable
 @MainActor
 final class TranscriptionEngine {
@@ -12,150 +25,121 @@ final class TranscriptionEngine {
     private(set) var assetStatus: String = "Ready"
     private(set) var lastError: String?
 
-    let micCapture = MicCapture()
     private let systemCapture = SystemAudioCapture()
+    private let micCapture = MicCapture()
     private let transcriptStore: TranscriptStore
+
+    /// Audio level from mic for the UI meter.
+    var audioLevel: Float { micCapture.audioLevel }
 
     private var micTask: Task<Void, Never>?
     private var sysTask: Task<Void, Never>?
+    /// Keeps the mic stream alive for the audio level meter when transcription isn't running.
+    private var micKeepAliveTask: Task<Void, Never>?
+
+    /// Shared FluidAudio instances
+    private var asrManager: AsrManager?
+    private var vadManager: VadManager?
 
     init(transcriptStore: TranscriptStore) {
         self.transcriptStore = transcriptStore
     }
 
     func start(locale: Locale, inputDeviceID: AudioDeviceID = 0) async {
+        diagLog("[ENGINE-0] start() called, isRunning=\(isRunning)")
         guard !isRunning else { return }
         lastError = nil
 
         guard await ensureMicrophonePermission() else { return }
 
         isRunning = true
-        assetStatus = "Preparing..."
 
-        let micTranscriber = SpeechTranscriber(
-            locale: locale,
-            preset: .progressiveTranscription
-        )
+        // 1. Load FluidAudio models
+        assetStatus = "Downloading models..."
+        diagLog("[ENGINE-1] loading FluidAudio models...")
+        do {
+            let models = try await AsrModels.downloadAndLoad(version: .v2)
+            let asr = AsrManager(config: .default)
+            try await asr.initialize(models: models)
+            self.asrManager = asr
 
-        let sysTranscriber = SpeechTranscriber(
-            locale: locale,
-            preset: .progressiveTranscription
-        )
+            let vad = try await VadManager()
+            self.vadManager = vad
 
-        // Check and install assets if needed
-        let status = await AssetInventory.status(forModules: [micTranscriber])
-        switch status {
-        case .installed:
             assetStatus = "Models ready"
-        case .downloading, .supported:
-            assetStatus = "Installing speech models..."
-            do {
-                if let request = try await AssetInventory.assetInstallationRequest(supporting: [micTranscriber]) {
-                    // Observe progress via KVO
-                    let progress = request.progress
-                    while !progress.isFinished && !progress.isCancelled {
-                        assetStatus = "Installing: \(Int(progress.fractionCompleted * 100))%"
-                        try await Task.sleep(for: .milliseconds(500))
-                    }
-                }
-                assetStatus = "Models ready"
-            } catch {
-                assetStatus = "Model install failed: \(error.localizedDescription)"
-                isRunning = false
-                return
-            }
-        case .unsupported:
-            assetStatus = "Speech recognition not supported for this locale"
+            diagLog("[ENGINE-2] FluidAudio models loaded")
+        } catch {
+            let msg = "Failed to load models: \(error.localizedDescription)"
+            diagLog("[ENGINE-2-FAIL] \(msg)")
+            lastError = msg
+            assetStatus = "Ready"
             isRunning = false
             return
-        @unknown default:
-            break
         }
 
-        // Start mic transcription
-        let deviceID: AudioDeviceID? = inputDeviceID > 0 ? inputDeviceID : nil
-        micTask = Task.detached { [micCapture, transcriptStore] in
-            do {
-                let micStream = micCapture.bufferStream(deviceID: deviceID)
-                let inputSequence = micStream.map { buffer -> AnalyzerInput in
-                    nonisolated(unsafe) let b = buffer
-                    return AnalyzerInput(buffer: b)
+        guard let asrManager, let vadManager else { return }
+
+        // 2. Start mic capture
+        let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.defaultInputDeviceID()
+        diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID))")
+        let micStream = micCapture.bufferStream(deviceID: targetMicID)
+
+        // 3. Start system audio capture
+        diagLog("[ENGINE-4] starting system audio capture...")
+        let sysStreams: SystemAudioCapture.CaptureStreams?
+        do {
+            sysStreams = try await systemCapture.bufferStream()
+            diagLog("[ENGINE-5] system audio capture started OK")
+        } catch {
+            let msg = "Failed to start system audio: \(error.localizedDescription)"
+            diagLog("[ENGINE-5-FAIL] \(msg)")
+            lastError = msg
+            sysStreams = nil
+        }
+
+        // 4. Start mic transcription
+        let store = transcriptStore
+        let micTranscriber = StreamingTranscriber(
+            asrManager: asrManager,
+            vadManager: vadManager,
+            speaker: .you,
+            onPartial: { text in
+                Task { @MainActor in store.volatileYouText = text }
+            },
+            onFinal: { text in
+                Task { @MainActor in
+                    store.volatileYouText = ""
+                    store.append(Utterance(text: text, speaker: .you))
                 }
+            }
+        )
+        micTask = Task.detached {
+            await micTranscriber.run(stream: micStream)
+        }
 
-                let analyzer = SpeechAnalyzer(
-                    inputSequence: inputSequence,
-                    modules: [micTranscriber]
-                )
-
-                for try await result in micTranscriber.results {
-                    let text = String(result.text.characters)
-                    guard !text.isEmpty else { continue }
-
-                    let isFinal = result.range.duration != .zero
-
-                    await MainActor.run {
-                        if isFinal {
-                            transcriptStore.volatileYouText = ""
-                            transcriptStore.append(Utterance(text: text, speaker: .you))
-                        } else {
-                            transcriptStore.volatileYouText = text
-                        }
+        // 5. Start system audio transcription
+        if let sysStream = sysStreams?.systemAudio {
+            let sysTranscriber = StreamingTranscriber(
+                asrManager: asrManager,
+                vadManager: vadManager,
+                speaker: .them,
+                onPartial: { text in
+                    Task { @MainActor in store.volatileThemText = text }
+                },
+                onFinal: { text in
+                    Task { @MainActor in
+                        store.volatileThemText = ""
+                        store.append(Utterance(text: text, speaker: .them))
                     }
                 }
-
-                _ = analyzer
-            } catch {
-                if !Task.isCancelled {
-                    let msg = "Mic error: \(error.localizedDescription)"
-                    print(msg)
-                    await MainActor.run { [weak self] in
-                        self?.lastError = msg
-                    }
-                }
+            )
+            sysTask = Task.detached {
+                await sysTranscriber.run(stream: sysStream)
             }
         }
 
-        // Start system audio transcription
-        sysTask = Task.detached { [systemCapture, transcriptStore] in
-            do {
-                let sysStream = try await systemCapture.bufferStream()
-                let inputSequence = sysStream.map { buffer -> AnalyzerInput in
-                    nonisolated(unsafe) let b = buffer
-                    return AnalyzerInput(buffer: b)
-                }
-
-                let analyzer = SpeechAnalyzer(
-                    inputSequence: inputSequence,
-                    modules: [sysTranscriber]
-                )
-
-                for try await result in sysTranscriber.results {
-                    let text = String(result.text.characters)
-                    guard !text.isEmpty else { continue }
-
-                    let isFinal = result.range.duration != .zero
-
-                    await MainActor.run {
-                        if isFinal {
-                            transcriptStore.volatileThemText = ""
-                            transcriptStore.append(Utterance(text: text, speaker: .them))
-                        } else {
-                            transcriptStore.volatileThemText = text
-                        }
-                    }
-                }
-
-                _ = analyzer
-            } catch {
-                if !Task.isCancelled {
-                    let msg = "System audio error: \(error.localizedDescription)"
-                    print(msg)
-                    await MainActor.run { [weak self] in
-                        self?.lastError = msg
-                    }
-                }
-            }
-        }
+        assetStatus = "Transcribing (Parakeet-TDT v2)"
+        diagLog("[ENGINE-6] all transcription tasks started")
     }
 
     private func ensureMicrophonePermission() async -> Bool {
@@ -183,10 +167,12 @@ final class TranscriptionEngine {
     func stop() {
         micTask?.cancel()
         sysTask?.cancel()
+        micKeepAliveTask?.cancel()
         micTask = nil
         sysTask = nil
-        micCapture.stop()
+        micKeepAliveTask = nil
         Task { await systemCapture.stop() }
+        micCapture.stop()
         isRunning = false
         assetStatus = "Ready"
     }
