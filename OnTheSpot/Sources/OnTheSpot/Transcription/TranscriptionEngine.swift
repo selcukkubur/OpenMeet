@@ -41,6 +41,15 @@ final class TranscriptionEngine {
     private var asrManager: AsrManager?
     private var vadManager: VadManager?
 
+    /// Tracks the resolved mic device ID currently in use.
+    private var currentMicDeviceID: AudioDeviceID = 0
+
+    /// Tracks whether user selected "System Default" (0) or a specific device.
+    private var userSelectedDeviceID: AudioDeviceID = 0
+
+    /// Listens for default input device changes at the OS level.
+    private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+
     init(transcriptStore: TranscriptStore) {
         self.transcriptStore = transcriptStore
     }
@@ -83,7 +92,9 @@ final class TranscriptionEngine {
         guard let asrManager, let vadManager else { return }
 
         // 2. Start mic capture
+        userSelectedDeviceID = inputDeviceID
         let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.defaultInputDeviceID()
+        currentMicDeviceID = targetMicID ?? 0
         diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID))")
         let micStream = micCapture.bufferStream(deviceID: targetMicID)
 
@@ -143,6 +154,102 @@ final class TranscriptionEngine {
 
         assetStatus = "Transcribing (Parakeet-TDT v2)"
         diagLog("[ENGINE-6] all transcription tasks started")
+
+        // Install CoreAudio listener for default input device changes
+        installDefaultDeviceListener()
+    }
+
+    /// Restart only the mic capture with a new device, keeping system audio and models intact.
+    /// Pass the raw setting value (0 = system default, or a specific AudioDeviceID).
+    func restartMic(inputDeviceID: AudioDeviceID) {
+        guard isRunning, let asrManager, let vadManager else { return }
+
+        // Only update user selection when explicitly changed (not from OS listener)
+        if inputDeviceID != 0 || userSelectedDeviceID != 0 {
+            userSelectedDeviceID = inputDeviceID
+        }
+        let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.defaultInputDeviceID() ?? 0
+        guard targetMicID != currentMicDeviceID else {
+            diagLog("[ENGINE-MIC-SWAP] same device \(targetMicID), skipping")
+            return
+        }
+
+        diagLog("[ENGINE-MIC-SWAP] switching mic from \(currentMicDeviceID) to \(targetMicID)")
+
+        // Tear down old mic
+        micTask?.cancel()
+        micTask = nil
+        micCapture.stop()
+
+        currentMicDeviceID = targetMicID
+
+        // Start new mic stream
+        let micStream = micCapture.bufferStream(deviceID: targetMicID)
+        let store = transcriptStore
+        let micTranscriber = StreamingTranscriber(
+            asrManager: asrManager,
+            vadManager: vadManager,
+            speaker: .you,
+            onPartial: { text in
+                Task { @MainActor in store.volatileYouText = text }
+            },
+            onFinal: { text in
+                Task { @MainActor in
+                    store.volatileYouText = ""
+                    store.append(Utterance(text: text, speaker: .you))
+                }
+            }
+        )
+        micTask = Task.detached {
+            await micTranscriber.run(stream: micStream)
+        }
+
+        diagLog("[ENGINE-MIC-SWAP] mic restarted on device \(targetMicID)")
+    }
+
+    // MARK: - Default Device Listener
+
+    private func installDefaultDeviceListener() {
+        guard defaultDeviceListenerBlock == nil else { return }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.isRunning, self.userSelectedDeviceID == 0 else { return }
+                // User has "System Default" selected — follow the OS default
+                self.restartMic(inputDeviceID: 0)
+            }
+        }
+        defaultDeviceListenerBlock = block
+
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            block
+        )
+    }
+
+    private func removeDefaultDeviceListener() {
+        guard let block = defaultDeviceListenerBlock else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            block
+        )
+        defaultDeviceListenerBlock = nil
     }
 
     private func ensureMicrophonePermission() async -> Bool {
@@ -168,6 +275,7 @@ final class TranscriptionEngine {
     }
 
     func stop() {
+        removeDefaultDeviceListener()
         micTask?.cancel()
         sysTask?.cancel()
         micKeepAliveTask?.cancel()
@@ -176,6 +284,7 @@ final class TranscriptionEngine {
         micKeepAliveTask = nil
         Task { await systemCapture.stop() }
         micCapture.stop()
+        currentMicDeviceID = 0
         isRunning = false
         assetStatus = "Ready"
     }

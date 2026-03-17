@@ -100,6 +100,11 @@ struct ContentView: View {
         .onChange(of: settings.voyageApiKey) {
             indexKBIfNeeded()
         }
+        .onChange(of: settings.inputDeviceID) {
+            if isRunning {
+                transcriptionEngine?.restartMic(inputDeviceID: settings.inputDeviceID)
+            }
+        }
         .onChange(of: transcriptStore.utterances.count) {
             handleNewUtterance()
         }
