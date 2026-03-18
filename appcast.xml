@@ -6,14 +6,14 @@
     <description>Most recent updates to OpenGranola</description>
     <language>en</language>
     <item>
-      <title>Version 1.4.3</title>
-      <pubDate>Wed, 18 Mar 2026 00:34:56 +0000</pubDate>
-      <sparkle:version>1.4.3</sparkle:version>
-      <sparkle:shortVersionString>1.4.3</sparkle:shortVersionString>
+      <title>Version 1.5.0</title>
+      <pubDate>Wed, 18 Mar 2026 07:08:13 +0000</pubDate>
+      <sparkle:version>1.5.0</sparkle:version>
+      <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <enclosure url="https://github.com/yazinsai/OpenGranola/releases/download/v1.4.3/OpenGranola.dmg"
-       sparkle:edSignature="SxU4SY5UtcBMDR9Do+0r0zUDNQWF/rUIBTIYEOiN5CBrBotGsQ4wMkJjW061k00dj1B6+INGIhStu6bseHqUBQ=="
-       length="5222401"
+      <enclosure url="https://github.com/yazinsai/OpenGranola/releases/download/v1.5.0/OpenGranola.dmg"
+       sparkle:edSignature="LNbnP73p+sM9Zm7UtRew5bB3841mxpKlz5g1sVRANZG9Au+m9q6T93ecwYkbyHW78NFtM3Y+wlJm8bF0XGO1Aw=="
+       length="5452861"
        type="application/octet-stream" />
     </item>
   </channel>
