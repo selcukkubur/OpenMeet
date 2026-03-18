@@ -6,11 +6,7 @@ import Sparkle
 struct OpenGranolaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var settings = AppSettings()
-    private let updaterController: SPUStandardUpdaterController
-
-    init() {
-        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
-    }
+    private let updaterController = AppUpdaterController()
 
     var body: some Scene {
         WindowGroup {
