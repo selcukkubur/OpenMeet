@@ -6,14 +6,14 @@
     <description>Most recent updates to OpenOats</description>
     <language>en</language>
     <item>
-      <title>Version 1.21.0</title>
-      <pubDate>Mon, 23 Mar 2026 04:16:02 +0000</pubDate>
-      <sparkle:version>1.21.0</sparkle:version>
-      <sparkle:shortVersionString>1.21.0</sparkle:shortVersionString>
+      <title>Version 1.22.0</title>
+      <pubDate>Mon, 23 Mar 2026 18:16:43 +0000</pubDate>
+      <sparkle:version>1.22.0</sparkle:version>
+      <sparkle:shortVersionString>1.22.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-      <enclosure url="https://github.com/yazinsai/OpenOats/releases/download/v1.21.0/OpenOats.dmg"
-       sparkle:edSignature="GleIn22ayqBKex+GqQ6JDzfSLEFd6c3eJ/RWKjFQAd/UXw0zW3AgUqfJeb+rHH/lYRbK7h2NMcQw35Z1oQn8BA=="
-       length="9160546"
+      <enclosure url="https://github.com/yazinsai/OpenOats/releases/download/v1.22.0/OpenOats.dmg"
+       sparkle:edSignature="gfH/rcjm+B6FNyD3cH+5MThgmhhiHKeaU/lTEOFIsC5EQisLtHZAoObViIfByjMLb3rbFR0StXbZCEqFHTBdCg=="
+       length="9208677"
        type="application/octet-stream" />
     </item>
   </channel>
