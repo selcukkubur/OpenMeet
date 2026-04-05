@@ -13,6 +13,17 @@ enum DetectionEvent: Sendable {
     case systemSleep
 }
 
+struct DetectionSnapshot: Sendable {
+    let trigger: DetectionTrigger
+    let app: MeetingApp?
+    let detectedAt: Date
+}
+
+enum DismissKey: Hashable {
+    case app(bundleID: String)
+    case cameraOnly
+}
+
 /// Owns the meeting detection lifecycle: mic monitoring, notification prompting,
 /// silence timeout, and sleep observation. Exposes an `AsyncStream<DetectionEvent>`
 /// consumed exactly once by the coordinator.
@@ -68,9 +79,12 @@ final class MeetingDetectionController {
     /// Timestamp of the last utterance, used for silence timeout.
     private var lastUtteranceAt: Date?
 
-    /// Sessions the user dismissed via "Not a Meeting" (by detected app bundle ID).
-    /// Cleared on app restart. Prevents re-prompting for the same app within a session.
-    private(set) var dismissedEvents: Set<String> = []
+    /// Sessions the user dismissed via "Not a Meeting".
+    /// Cleared on app restart. Prevents re-prompting for the same detection source.
+    private(set) var dismissedEvents: Set<DismissKey> = []
+
+    /// Frozen snapshot of the detection state when the notification was posted.
+    private var pendingSnapshot: DetectionSnapshot?
 
     /// Retained reference to the active settings for detection callbacks.
     private(set) var activeSettings: AppSettings?
@@ -105,17 +119,21 @@ final class MeetingDetectionController {
     // MARK: - Setup / Teardown
 
     /// Initialize and start the meeting detection system.
-    func setup(settings: AppSettings) {
+    func setup(
+        settings: AppSettings,
+        detector: MeetingDetector? = nil,
+        notificationService injectedService: NotificationService? = nil
+    ) {
         guard meetingDetector == nil else { return }
         activeSettings = settings
         isEnabled = true
 
-        let detector = MeetingDetector(
+        let detector = detector ?? MeetingDetector(
             customBundleIDs: settings.customMeetingAppBundleIDs
         )
         meetingDetector = detector
 
-        let service = NotificationService()
+        let service = injectedService ?? NotificationService()
         notificationService = service
 
         // Wire notification callbacks to yield events
@@ -316,8 +334,8 @@ final class MeetingDetectionController {
         guard !isSessionActive() else { return }
         guard let detector = meetingDetector else { return }
 
-        let (micActive, app) = await detector.queryCurrentState()
-        if micActive, app != nil {
+        let (micActive, cameraActive, app) = await detector.queryCurrentState()
+        if cameraActive || (micActive && app != nil) {
             await handleMeetingDetected(app: app)
         }
     }
@@ -330,8 +348,9 @@ final class MeetingDetectionController {
         // Don't prompt if already recording
         guard !isSessionActive() else { return }
 
-        // Don't re-prompt for dismissed apps
-        if let bundleID = app?.bundleID, dismissedEvents.contains(bundleID) {
+        // Build dismiss key
+        let dismissKey: DismissKey = app.map { .app(bundleID: $0.bundleID) } ?? .cameraOnly
+        if dismissedEvents.contains(dismissKey) {
             return
         }
 
@@ -341,11 +360,22 @@ final class MeetingDetectionController {
             return
         }
 
+        // Get trigger from detector
+        let trigger = await meetingDetector?.detectionTrigger ?? .micAndApp
+        let isCameraTrigger = trigger == .camera
+
+        // Freeze snapshot
+        pendingSnapshot = DetectionSnapshot(
+            trigger: trigger,
+            app: app,
+            detectedAt: Date()
+        )
+
         if activeSettings?.detectionLogEnabled == true {
-            Log.meetingDetection.info("Detected: \(app?.name ?? "unknown", privacy: .public)")
+            Log.meetingDetection.info("Detected: \(app?.name ?? "unknown", privacy: .public) (trigger: \(isCameraTrigger ? "camera" : "mic+app", privacy: .public))")
         }
 
-        let posted = await notificationService?.postMeetingDetected(appName: app?.name) ?? false
+        let posted = await notificationService?.postMeetingDetected(appName: app?.name, isCameraTrigger: isCameraTrigger) ?? false
         if !posted {
             if activeSettings?.detectionLogEnabled == true {
                 Log.meetingDetection.debug("Failed to post notification (permission denied?)")
@@ -355,16 +385,36 @@ final class MeetingDetectionController {
 
     private func handleMeetingEnded() {
         detectedApp = nil
+        notificationService?.cancelPending()
+        pendingSnapshot = nil
         eventContinuation.yield(.meetingAppExited)
     }
 
     private func handleDetectionAccepted() {
+        let snapshot = pendingSnapshot
+        pendingSnapshot = nil
+
         Task {
-            let app = await meetingDetector?.detectedApp
+            let app: MeetingApp?
+            if let snapshotApp = snapshot?.app {
+                app = snapshotApp
+            } else {
+                app = await meetingDetector?.detectedApp
+            }
             let calEvent = calendarManager?.currentEvent()
+
+            let signal: DetectionSignal
+            if snapshot?.trigger == .camera {
+                signal = .cameraActivated
+            } else if let app {
+                signal = .appLaunched(app)
+            } else {
+                signal = .audioActivity
+            }
+
             let context = DetectionContext(
-                signal: app.map { .appLaunched($0) } ?? .audioActivity,
-                detectedAt: Date(),
+                signal: signal,
+                detectedAt: snapshot?.detectedAt ?? Date(),
                 meetingApp: app,
                 calendarEvent: calEvent
             )
@@ -381,10 +431,20 @@ final class MeetingDetectionController {
     }
 
     private func handleDetectionNotAMeeting() {
+        let snapshot = pendingSnapshot
+        pendingSnapshot = nil
+
         Task {
-            if let app = await meetingDetector?.detectedApp {
-                dismissedEvents.insert(app.bundleID)
-                eventContinuation.yield(.notAMeeting(bundleID: app.bundleID))
+            let app: MeetingApp?
+            if let snapshotApp = snapshot?.app {
+                app = snapshotApp
+            } else {
+                app = await meetingDetector?.detectedApp
+            }
+            let dismissKey: DismissKey = app.map { .app(bundleID: $0.bundleID) } ?? .cameraOnly
+            dismissedEvents.insert(dismissKey)
+            if let bundleID = app?.bundleID {
+                eventContinuation.yield(.notAMeeting(bundleID: bundleID))
             }
         }
 
@@ -394,15 +454,25 @@ final class MeetingDetectionController {
     }
 
     private func handleIgnoreApp() {
+        let snapshot = pendingSnapshot
+        pendingSnapshot = nil
+
         Task {
-            if let app = await meetingDetector?.detectedApp, let settings = activeSettings {
+            let app: MeetingApp?
+            if let snapshotApp = snapshot?.app {
+                app = snapshotApp
+            } else {
+                app = await meetingDetector?.detectedApp
+            }
+            if let app, let settings = activeSettings {
                 var ignored = settings.ignoredAppBundleIDs
                 if !ignored.contains(app.bundleID) {
                     ignored.append(app.bundleID)
                     settings.ignoredAppBundleIDs = ignored
                 }
-                dismissedEvents.insert(app.bundleID)
+                dismissedEvents.insert(.app(bundleID: app.bundleID))
             }
+            // Camera-only detection has no app to ignore — no-op
         }
 
         if activeSettings?.detectionLogEnabled == true {

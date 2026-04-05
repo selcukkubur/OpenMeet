@@ -562,6 +562,17 @@ final class SettingsStore {
         }
     }
 
+    @ObservationIgnored nonisolated(unsafe) private var _hasShownCameraDetectExplanation: Bool
+    var hasShownCameraDetectExplanation: Bool {
+        get { access(keyPath: \.hasShownCameraDetectExplanation); return _hasShownCameraDetectExplanation }
+        set {
+            withMutation(keyPath: \.hasShownCameraDetectExplanation) {
+                _hasShownCameraDetectExplanation = newValue
+                defaults.set(newValue, forKey: "hasShownCameraDetectExplanation")
+            }
+        }
+    }
+
     @ObservationIgnored nonisolated(unsafe) private var _calendarIntegrationEnabled: Bool
     var calendarIntegrationEnabled: Bool {
         get { access(keyPath: \.calendarIntegrationEnabled); return _calendarIntegrationEnabled }
@@ -808,6 +819,7 @@ final class SettingsStore {
             ? defaults.integer(forKey: "silenceTimeoutMinutes") : 15
         self._detectionLogEnabled = defaults.bool(forKey: "detectionLogEnabled")
         self._hasShownAutoDetectExplanation = defaults.bool(forKey: "hasShownAutoDetectExplanation")
+        self._hasShownCameraDetectExplanation = defaults.bool(forKey: "hasShownCameraDetectExplanation")
         self._calendarIntegrationEnabled = defaults.bool(forKey: "calendarIntegrationEnabled")
 
         // Privacy Settings

@@ -24,7 +24,8 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
     // MARK: - Action Identifiers
 
-    private static let categoryID = "MEETING_DETECTED"
+    private static let categoryWithAppID = "MEETING_DETECTED_WITH_APP"
+    private static let categoryNoAppID = "MEETING_DETECTED_NO_APP"
     private static let startAction = "START_TRANSCRIBING"
     private static let notMeetingAction = "NOT_A_MEETING"
     private static let ignoreAppAction = "IGNORE_APP"
@@ -58,14 +59,21 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             options: []
         )
 
-        let category = UNNotificationCategory(
-            identifier: Self.categoryID,
+        let categoryWithApp = UNNotificationCategory(
+            identifier: Self.categoryWithAppID,
             actions: [notMeeting, ignoreApp, dismiss],
             intentIdentifiers: [],
             options: [.customDismissAction]
         )
 
-        UNUserNotificationCenter.current().setNotificationCategories([category])
+        let categoryNoApp = UNNotificationCategory(
+            identifier: Self.categoryNoAppID,
+            actions: [notMeeting, dismiss],
+            intentIdentifiers: [],
+            options: [.customDismissAction]
+        )
+
+        UNUserNotificationCenter.current().setNotificationCategories([categoryWithApp, categoryNoApp])
         UNUserNotificationCenter.current().delegate = self
     }
 
@@ -91,7 +99,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
     /// Post a meeting detection notification with the given app name.
     /// Returns false if permission was denied.
-    func postMeetingDetected(appName: String?) async -> Bool {
+    func postMeetingDetected(appName: String?, isCameraTrigger: Bool = false) async -> Bool {
         guard await ensurePermission() else { return false }
 
         // Cancel any existing timeout
@@ -106,13 +114,22 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         if let appName {
             content.title = "Meeting Detected"
-            content.body = "\(appName) is using your microphone. Tap to start transcribing."
+            if isCameraTrigger {
+                content.body = "\(appName) — tap to start transcribing."
+            } else {
+                content.body = "\(appName) is using your microphone. Tap to start transcribing."
+            }
         } else {
-            content.title = "Microphone Active"
-            content.body = "A meeting may be in progress. Tap to start transcribing."
+            if isCameraTrigger {
+                content.title = "Camera Active"
+                content.body = "Camera is active. Tap to start transcribing."
+            } else {
+                content.title = "Microphone Active"
+                content.body = "A meeting may be in progress. Tap to start transcribing."
+            }
         }
         content.sound = .default
-        content.categoryIdentifier = Self.categoryID
+        content.categoryIdentifier = appName != nil ? Self.categoryWithAppID : Self.categoryNoAppID
 
         let request = UNNotificationRequest(
             identifier: "meeting-detection",

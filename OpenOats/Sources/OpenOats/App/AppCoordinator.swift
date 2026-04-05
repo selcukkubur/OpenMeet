@@ -238,18 +238,38 @@ final class AppCoordinator {
                 guard let self, !Task.isCancelled else { break }
                 switch event {
                 case .accepted(let metadata):
-                    // Start silence monitoring for auto-detected sessions
-                    if case .appLaunched(let app) = metadata.detectionContext?.signal {
+                    let signal = metadata.detectionContext?.signal
+                    if case .appLaunched(let app) = signal {
                         controller.startSilenceMonitoring()
                         controller.startAppExitMonitoring(bundleID: app.bundleID)
+                    } else if case .cameraActivated = signal {
+                        controller.startSilenceMonitoring()
+                        if let app = metadata.detectionContext?.meetingApp {
+                            controller.startAppExitMonitoring(bundleID: app.bundleID)
+                        }
                     }
                     self.handle(.userStarted(metadata), settings: self.activeSettings)
                 case .meetingAppExited:
-                    if case .recording(let meta) = self.state,
-                       case .appLaunched = meta.detectionContext?.signal {
-                        controller.stopSilenceMonitoring()
-                        controller.stopAppExitMonitoring()
-                        self.handle(.userStopped)
+                    if case .recording(let meta) = self.state {
+                        let signal = meta.detectionContext?.signal
+                        if case .cameraActivated = signal {
+                            // Check if camera is still active — don't stop if it is
+                            if let detector = controller.meetingDetector {
+                                let trigger = await detector.detectionTrigger
+                                if trigger == .camera {
+                                    break // Camera still on, ignore app exit
+                                }
+                            }
+                        }
+                        if case .appLaunched = signal {
+                            controller.stopSilenceMonitoring()
+                            controller.stopAppExitMonitoring()
+                            self.handle(.userStopped)
+                        } else if case .cameraActivated = signal {
+                            controller.stopSilenceMonitoring()
+                            controller.stopAppExitMonitoring()
+                            self.handle(.userStopped)
+                        }
                     }
                 case .silenceTimeout:
                     if case .recording = self.state {

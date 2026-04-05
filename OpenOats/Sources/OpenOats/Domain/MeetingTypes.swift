@@ -26,6 +26,8 @@ enum DetectionSignal: Sendable, Hashable, Codable {
     case calendarEvent(CalendarEvent)
     /// Audio activity was detected from a meeting source.
     case audioActivity
+    /// A camera was activated, suggesting a video call.
+    case cameraActivated
 }
 
 // MARK: - Detection Context

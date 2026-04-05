@@ -361,6 +361,18 @@ final class MeetingStateTests: XCTestCase {
         XCTAssertEqual(signal, .audioActivity)
     }
 
+    func testDetectionSignalCameraActivated() {
+        let signal = DetectionSignal.cameraActivated
+        XCTAssertEqual(signal, .cameraActivated)
+    }
+
+    func testDetectionSignalCameraActivatedCodable() throws {
+        let signal = DetectionSignal.cameraActivated
+        let data = try JSONEncoder().encode(signal)
+        let decoded = try JSONDecoder().decode(DetectionSignal.self, from: data)
+        XCTAssertEqual(decoded, signal)
+    }
+
     func testDetectionContext() {
         let app = MeetingApp(bundleID: "us.zoom.xos", name: "Zoom")
         let ctx = DetectionContext(
